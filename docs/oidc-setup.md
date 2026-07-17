@@ -65,23 +65,59 @@ Without this mapping, group-based access control in SixtyOps will not work.
 
 > **Note:** The `groups` scope is not part of the OIDC standard — it is
 > specific to Authentik (and Keycloak). If using a different identity provider,
-> check its documentation for how to include group membership in the ID token.
-> Providers that don't recognize the `groups` scope will silently ignore it.
+> check its documentation for how to include group membership in the ID token
+> and set the **Scopes** field accordingly. Behaviour for an unrecognized scope
+> varies by provider: some ignore it, but **Microsoft Entra (Azure AD) rejects
+> the entire authorization request** (`AADSTS650053`) rather than ignoring it —
+> see the Entra section below.
+
+## Microsoft Entra (Azure AD)
+
+Entra does **not** accept `groups` as an OAuth scope. Requesting it aborts login
+with `AADSTS650053: ... asked for scope 'groups' that doesn't exist`. Group
+membership on Entra is delivered as a **token claim** configured on the app
+registration, not requested as a scope.
+
+1. **Provider URL** — use the v2.0 authority:
+   `https://login.microsoftonline.com/<tenant-id>/v2.0`
+   (its discovery document points at the `/oauth2/v2.0/token` endpoint).
+2. **Scopes** — set to `openid email profile` (drop `groups`).
+3. **Group claim** — in the app registration, open **Token configuration >
+   Add groups claim**, and add it to the **ID token**. Entra emits group
+   **Object IDs (GUIDs)**, not display names.
+4. **Allowed Group / Admin Group** — enter the group's **Object ID (GUID)**,
+   because that is what the claim contains. (Group *names* only work with
+   Authentik/Keycloak-style providers that emit names.)
+5. **Redirect URI** — register `https://<sixtyops>/auth/oidc/callback` exactly
+   under the app registration's **Web** platform, scheme/host/path matching.
 
 ### Via Environment Variables
 
-For deployment-time configuration, set these in your compose or env file:
+For deployment-time (GitOps) configuration, set these in your compose or env
+file:
 
 | Variable | Description |
 |----------|-------------|
-| `OIDC_PROVIDER_URL` | Full URL to the Authentik application |
+| `OIDC_ENABLED` | `true`/`false` — turn SSO on without touching the UI |
+| `OIDC_PROVIDER_URL` | Full URL to the provider application / v2.0 authority |
 | `OIDC_CLIENT_ID` | OAuth2 client ID |
 | `OIDC_CLIENT_SECRET` | OAuth2 client secret |
 | `OIDC_REDIRECT_URI` | Callback URL (`https://<sixtyops>/auth/oidc/callback`) |
-| `OIDC_ALLOWED_GROUP` | Required group name for access |
+| `OIDC_ALLOWED_GROUP` | Required group (name for Authentik; **GUID** for Entra) |
+| `OIDC_ADMIN_GROUP` | Group granting the admin role (name for Authentik; **GUID** for Entra) |
 | `OIDC_SCOPES` | Override default scopes (default: `openid email profile groups`) |
 
-Database settings take precedence over environment variables once saved.
+**Precedence is per field: an environment variable wins over the stored
+database value for that field, and the others fall back to the database.** This
+lets you pin, say, the provider URL and scopes from compose while still setting
+the client secret from the UI — no container restart to change a DB-backed
+field.
+
+Any field set by an environment variable is **read-only in the Settings UI**
+(greyed out with a note); to change it, edit the container configuration and
+restart. A blank env var (e.g. `OIDC_SCOPES=`) is treated as *unset* and does
+not lock the field. Env-locked fields are never written back to the database, so
+the two sources can't drift.
 
 ## Self-Hosted OIDC Providers (LAN)
 
