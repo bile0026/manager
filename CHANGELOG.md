@@ -77,7 +77,10 @@ All notable changes to this project are documented in this file.
   **Admin Group** (previously dropped, so it was wiped on the next save), and the
   save API preserves stored scopes when a client omits them. OIDC token-exchange
   failures now log the provider's response body (e.g. the real `AADSTS` code)
-  instead of a bare status line. See `docs/oidc-setup.md` for the Entra setup.
+  instead of a bare status line, and group-based denials log the group claim the
+  token actually carried (so a name-vs-GUID mismatch or a missing/overage claim
+  is obvious). See `docs/oidc-setup.md` for the Entra setup, including the
+  group-claim format (**Group ID**, not "emit as role claims") this requires.
 - **A scheduled wave can no longer be silently skipped when its job fails to
   start.** If starting a wave failed (for example, a missing-family firmware
   refusal), the wave's devices could be left marked "pending" and then excluded

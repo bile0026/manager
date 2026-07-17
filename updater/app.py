@@ -3485,6 +3485,19 @@ async def oidc_callback(request: Request, code: str = None, state: str = None, e
     email = claims.get("email", "")
     groups = claims.get("groups", [])
 
+    # Diagnostic: surface what the IdP actually put in the token so group-match
+    # failures are debuggable. `groups` is empty here when the claim is missing
+    # from the ID token or was replaced by an overage pointer (too many groups).
+    group_overage = bool(
+        claims.get("_claim_names")
+        or claims.get("_claim_sources")
+        or claims.get("hasgroups")
+    )
+    logger.info(
+        "OIDC token claims for %s: groups=%r overage=%s claim_keys=%s",
+        email or "?", groups, group_overage, sorted(claims.keys()),
+    )
+
     if not email:
         return RedirectResponse(url="/login?error=oidc_denied", status_code=302)
 

@@ -82,14 +82,41 @@ registration, not requested as a scope.
    `https://login.microsoftonline.com/<tenant-id>/v2.0`
    (its discovery document points at the `/oauth2/v2.0/token` endpoint).
 2. **Scopes** — set to `openid email profile` (drop `groups`).
-3. **Group claim** — in the app registration, open **Token configuration >
-   Add groups claim**, and add it to the **ID token**. Entra emits group
-   **Object IDs (GUIDs)**, not display names.
-4. **Allowed Group / Admin Group** — enter the group's **Object ID (GUID)**,
-   because that is what the claim contains. (Group *names* only work with
-   Authentik/Keycloak-style providers that emit names.)
-5. **Redirect URI** — register `https://<sixtyops>/auth/oidc/callback` exactly
-   under the app registration's **Web** platform, scheme/host/path matching.
+3. **Client type = confidential (Web).** Under **Authentication**, register
+   `https://<sixtyops>/auth/oidc/callback` under the **Web** platform (exact
+   scheme/host/path), and set **Allow public client flows** to **No**. SixtyOps
+   is a server-side app that sends a client secret — if the callback is under
+   the **Single-page application (SPA)** (or Mobile/desktop) platform, Entra
+   treats it as a public client and the token exchange fails with `AADSTS700025:
+   Client is public so neither 'client_assertion' nor 'client_secret' should be
+   presented`. A redirect URI can only live under one platform; move it out of
+   SPA and into Web.
+4. **Group claim** — open **Token configuration > Add groups claim**, pick the
+   group types (e.g. **Security groups**), then in **Edit groups claim** for the
+   **ID** token:
+   - select **Group ID** — the `sAMAccountName` / `NetBIOSDomain\…` formats only
+     work for groups synced from on-prem AD; **cloud-only groups emit nothing**
+     in those formats; and
+   - **uncheck "Emit groups as role claims"** — that would deliver the values in
+     the `roles` claim, but SixtyOps reads the `groups` claim.
+
+   The result is `"groups": ["<guid>", …]` in the ID token.
+5. **Allowed Group / Admin Group** — enter the group's **Object ID (GUID)**
+   (Groups > All groups > the group > *Object Id*), because that is what the
+   Group ID claim contains. (Group *names* only work with Authentik/Keycloak-
+   style providers that emit names.)
+
+### Entra troubleshooting
+
+SixtyOps logs the provider's error body and the token's group claim, so most
+failures name themselves in `docker compose logs sixtyops-mgmt`:
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| `AADSTS650053 … scope 'groups' … doesn't exist` | `groups` requested as a scope | Set **Scopes** to `openid email profile` (step 2) |
+| `AADSTS700025: Client is public …` | Callback registered under SPA / public client | Register the redirect URI under the **Web** platform (step 3) |
+| Login succeeds, then `not in group '<guid>'` with `token groups: none` | Groups claim missing from the ID token, wrong format, or emitted as roles | Group claim = **Group ID**, on the **ID** token, **not** "emit as role claims" (step 4) |
+| `not in group '<guid>'` but the log shows *other* GUIDs | Wrong Object ID in Allowed/Admin Group | Copy the group's **Object Id** (step 5) |
 
 ### Via Environment Variables
 
