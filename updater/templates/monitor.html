@@ -3374,7 +3374,7 @@
                         <div id="backupStatusInfo" style="font-size:0.75rem;color:var(--text-muted);padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:#fff;">Loading...</div>
                         <div style="display:flex;gap:6px;align-items:center;margin-top:8px;">
                             <button class="backup-btn" onclick="runBackupNow()">Run Now</button>
-                            <a href="/backup-setup" class="backup-btn u-bg-muted-cta" style="text-decoration:none;text-align:center;">Open SFTP Setup</a>
+                            <a href="/backup-setup" class="backup-btn u-bg-muted-cta" style="text-decoration:none;text-align:center;">Open Backup Setup</a>
                             <span id="backupRunStatus" class="u-text-xs-muted"></span>
                         </div>
                         <!-- Remote Backups (SFTP) restore panel hidden until the
@@ -10337,7 +10337,7 @@
                     const statusColor = data.last_status === 'success' ? '#10b981' : (data.last_status ? '#dc2626' : '#6b7280');
                     const statusText = data.last_status || 'never run';
                     const lastRun = data.last_run || 'Never';
-                    el.innerHTML = `Status: <strong style="color:${statusColor}">${escapeHtml(statusText)}</strong> · Last run: ${escapeHtml(lastRun)}${data.sftp_display ? ` · ${escapeHtml(data.sftp_display)}` : ''}`;
+                    el.innerHTML = `Status: <strong style="color:${statusColor}">${escapeHtml(statusText)}</strong> · Last run: ${escapeHtml(lastRun)}${data.destination_display ? ` · ${escapeHtml(data.destination_display)}` : ''}`;
                     // Remote backups list panel hidden until the feature is
                     // finished — see the markup note in systemSub-backup.
                 }

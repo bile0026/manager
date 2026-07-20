@@ -88,15 +88,16 @@ for errors and escalate.
 
 ## 8. Decide on backups (don't leave this unanswered)
 
-**Do:** Settings → Backups. Either configure an SFTP target (host, port,
-path, username, auth) and click **Test connection**, or explicitly note
+**Do:** Settings → Backups. Either configure a destination — an SFTP
+target (host, port, path, username, auth) or an S3 bucket — and click
+**Test connection**, or explicitly note
 in your runbook that you're running without backups for now.
 **Confirm:** If configured, **Test connection** returns green and
 **Run Now** produces a fresh archive on the remote host. If skipped,
 write down the conscious decision — leaving Backups in its default
-unconfigured state silently means *no off-host disaster recovery*. SFTP
+unconfigured state silently means *no off-host disaster recovery*. Backup
 failure modes are in
-[troubleshooting §5](troubleshooting.md#5-sftp-backup-failing).
+[troubleshooting §5](troubleshooting.md#5-remote-backup-failing).
 
 ## 9. Verify HTTPS
 

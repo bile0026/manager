@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 ## Unreleased
 
 ### Added
+- **Scheduled backups can now go to S3 instead of SFTP.** Settings → Backups
+  has a destination toggle; pick one or the other. It works with AWS S3 out of
+  the box, and an optional endpoint URL points it at MinIO, Wasabi, Backblaze
+  B2, or Cloudflare R2 for operators who'd rather keep backups on storage they
+  run themselves. Credentials are optional — leave the access key and secret
+  blank and the manager uses an attached IAM role or `AWS_*` environment
+  variables, so an AWS-hosted install never has to mint long-lived keys. The
+  secret is encrypted at rest like every other stored credential.
+  Existing SFTP installs are unaffected and keep running as-is.
 - Clients (CPEs) the manager **can't sign into** — because they use different
   login credentials than their access point — now show a clear amber
   **"Can't sign in"** badge on their row, distinct from being offline. The

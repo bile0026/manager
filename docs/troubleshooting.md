@@ -182,40 +182,58 @@ Browsers warn about an expired certificate, or **Settings > HTTPS** shows
 
 ---
 
-## 5. SFTP backup failing
+## 5. Remote backup failing
 
 ### Symptom
 **Settings > Backups** shows `last_status: failed: <error>`
-(`updater/sftp_backup.py:300`), or no recent backup files appear on the
-remote SFTP server.
+(`updater/remote_backup.py`), or no recent backup archives appear at the
+configured destination.
 
 ### Diagnose
 1. Open **Settings > Backups** and click **Test connection**. This calls
-   `test_backup_connection()` in `updater/sftp_backup.py:131` and
-   surfaces the underlying `asyncssh` error verbatim — that error is
+   `test_backup_connection()` in `updater/remote_backup.py` and surfaces
+   the underlying `asyncssh` / `botocore` error verbatim — that error is
    nearly always sufficient to identify the cause.
 2. Tail Manager logs for backup-related entries:
    ```bash
    docker compose logs sixtyops-mgmt --tail=200 | grep -i backup
    ```
-3. Common causes, in rough order of frequency:
-   - **Password or SSH key mismatch** — re-check the credentials block;
-     keys must include the matching `BEGIN/END` lines.
-   - **Remote path missing or not writable** — the configured path must
-     already exist; the Manager will not `mkdir -p` for you.
-   - **Remote disk full** — `asyncssh` surfaces this as an I/O error
-     part-way through the upload.
+3. Confirm you are diagnosing the destination that is actually selected.
+   Only one is active at a time; a leftover SFTP host does not matter if
+   the destination is set to S3.
+
+### Common causes — SFTP
+
+- **Password or SSH key mismatch** — re-check the credentials block;
+  keys must include the matching `BEGIN/END` lines.
+- **Remote path missing or not writable** — the test creates the path if
+  it can, so a failure here usually means a permissions problem.
+- **Remote disk full** — `asyncssh` surfaces this as an I/O error
+  part-way through the upload.
+
+### Common causes — S3
+
+- **`Access denied`** — the credentials need `s3:PutObject`,
+  `s3:GetObject`, `s3:ListBucket`, and `s3:DeleteObject` (the last is
+  required for retention pruning). The connection test round-trips a
+  marker object specifically so a read-only policy fails loudly at
+  configuration time rather than silently at 5 AM.
+- **`Wrong region for this bucket`** — the region field must match the
+  bucket's actual region.
+- **`No credentials found`** — both credential fields were left blank
+  (meaning "use an IAM role") but no role or `AWS_*` environment
+  variables are present on the host.
+- **S3-compatible provider rejecting the request** — MinIO, Wasabi, B2,
+  and R2 all need `backup_s3_endpoint_url` set; without it the client
+  talks to AWS.
 
 ### Recover
-- Re-enter credentials in **Settings > Backups** (host / port / path /
-  username / auth method are encrypted in the settings DB at
-  `updater/sftp_backup.py`).
-- Ensure the configured remote path exists and that the SFTP user can
-  write to it. A 30-second `ssh user@host mkdir -p /path` from a
-  workstation is the fastest way to verify both at once.
+
+- Re-enter credentials in **Settings > Backups**. The SFTP password and
+  the S3 secret access key are encrypted at rest in the settings DB.
 - Trigger a manual run from the **Run Now** button in Settings > Backups.
   Concurrent runs are prevented by `_backup_lock` in
-  `updater/sftp_backup.py`, so you'll get a clean error rather than a
+  `updater/remote_backup.py`, so you'll get a clean error rather than a
   half-run if one is already in flight.
 
 ---

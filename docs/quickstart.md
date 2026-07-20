@@ -92,7 +92,8 @@ After login the setup wizard opens automatically. Two decisions:
   internet, see
   [docs/deployment.md#ssltls](deployment.md#ssltls) for the DNS-01
   workflow.
-- **SFTP backups** — skip for now if you don't have an SFTP server ready.
+- **Off-box backups** — skip for now if you don't have an SFTP server or
+  S3 bucket ready.
   You can return to Settings → Backups later. (Decide on backups
   explicitly before you onboard real devices — the post-deploy checklist
   forces this question.)

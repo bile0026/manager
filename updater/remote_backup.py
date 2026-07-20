@@ -1,4 +1,11 @@
-"""SFTP-based backup system for database, settings, and device configs."""
+"""Scheduled backup of the database, settings, and device inventory.
+
+This module owns *what* gets backed up and the restore path. *Where* it goes is
+handled by `backup_targets`, which offers an SFTP server or S3-compatible object
+storage — an install picks one via the `backup_destination` setting. Nothing
+below branches on destination; it asks `backup_targets.get_target()` for a
+transport and calls the same operations either way.
+"""
 
 import asyncio
 import io
@@ -10,11 +17,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple
 
-import asyncssh
-
+from . import backup_targets
 from . import crypto
 from . import database as db
-from .crypto import encrypt_password, decrypt_password, is_encrypted
+from .backup_targets import is_archive_name
+from .crypto import encrypt_password
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +29,7 @@ logger = logging.getLogger(__name__)
 STAGING_DIR = Path("/app/backups")
 DATA_DIR = Path("/app/data")
 DB_FILE = DATA_DIR / "sixtyops.db"
-SSH_KEY_PATH = Path("/app/.ssh/backup_key")
+SSH_KEY_PATH = backup_targets.SSH_KEY_PATH
 
 # Prevent concurrent backup runs
 _backup_lock = asyncio.Lock()
@@ -31,25 +38,56 @@ _backup_lock = asyncio.Lock()
 def get_backup_status() -> dict:
     """Get current backup configuration and status."""
     settings = db.get_all_settings()
-    host = settings.get("backup_sftp_host", "")
-    port = settings.get("backup_sftp_port", "22")
-    username = settings.get("backup_sftp_username", "")
-    path = settings.get("backup_sftp_path", "")
+    destination = backup_targets.get_destination(settings)
+    target = backup_targets.get_target(settings)
+
     return {
         "enabled": settings.get("backup_enabled") == "true",
-        "sftp_host": host,
-        "sftp_port": port,
-        "sftp_path": path,
-        "sftp_username": username,
-        "sftp_display": f"{username}@{host}:{port}{path}" if host else "",
+        "destination": destination,
+        "destination_display": target.describe(),
+        "configured": backup_targets.is_configured(settings),
+        # SFTP form state
+        "sftp_host": settings.get("backup_sftp_host", ""),
+        "sftp_port": settings.get("backup_sftp_port", "22"),
+        "sftp_path": settings.get("backup_sftp_path", ""),
+        "sftp_username": settings.get("backup_sftp_username", ""),
+        "sftp_display": target.describe() if destination == "sftp" else "",
         "auth_method": settings.get("backup_sftp_auth_method", "password"),
+        # S3 form state. The secret is never returned — the form shows a masked
+        # placeholder and an empty submit keeps the stored value.
+        "s3_bucket": settings.get("backup_s3_bucket", ""),
+        "s3_prefix": settings.get("backup_s3_prefix", ""),
+        "s3_region": settings.get("backup_s3_region", ""),
+        "s3_endpoint_url": settings.get("backup_s3_endpoint_url", ""),
+        "s3_access_key_id": settings.get("backup_s3_access_key_id", ""),
+        "s3_secret_set": bool(settings.get("backup_s3_secret_access_key")),
         "retention_count": settings.get("backup_retention_count", "30"),
         "last_run": settings.get("backup_last_run", ""),
         "last_status": settings.get("backup_last_status", ""),
     }
 
 
-async def configure_backup(
+async def _finalize_configuration(destination: str, retention_count: int) -> Tuple[bool, str]:
+    """Persist shared settings, then verify the destination before enabling.
+
+    Backup stays disabled if the connection test fails, so the UI can never show
+    an enabled state for a destination we have not proven we can write to.
+    """
+    db.set_setting("backup_destination", destination)
+    db.set_setting("backup_retention_count", str(retention_count))
+
+    success, msg = await test_backup_connection()
+    if not success:
+        db.set_setting("backup_enabled", "false")
+        return False, f"Configuration saved but connection test failed: {msg}"
+
+    db.set_setting("backup_enabled", "true")
+    label = "S3" if destination == "s3" else "SFTP"
+    logger.info(f"Backup configured ({destination}): {backup_targets.get_target().describe()}")
+    return True, f"{label} backup configured and connection verified"
+
+
+async def configure_sftp_backup(
     host: str,
     port: int,
     path: str,
@@ -59,10 +97,7 @@ async def configure_backup(
     ssh_key: Optional[str] = None,
     retention_count: int = 30,
 ) -> Tuple[bool, str]:
-    """Save SFTP backup configuration and test connection.
-
-    Returns (success, message).
-    """
+    """Save SFTP backup configuration and test the connection."""
     if not host or not username:
         return False, "Host and username are required"
 
@@ -72,16 +107,15 @@ async def configure_backup(
         if not existing:
             return False, "Password is required for password authentication"
         password = None  # signal to skip overwriting
-    if auth_method == "key" and not ssh_key:
+    if auth_method == "key" and not ssh_key and not SSH_KEY_PATH.exists():
         return False, "SSH key is required for key authentication"
 
     # Store SSH key if provided
     if auth_method == "key" and ssh_key:
-        SSH_KEY_PATH.parent.mkdir(mode=0o700, exist_ok=True)
+        SSH_KEY_PATH.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         SSH_KEY_PATH.write_text(ssh_key.strip() + "\n")
         SSH_KEY_PATH.chmod(0o600)
 
-    # Save settings
     db.set_setting("backup_sftp_host", host)
     db.set_setting("backup_sftp_port", str(port))
     db.set_setting("backup_sftp_path", path)
@@ -89,123 +123,79 @@ async def configure_backup(
     db.set_setting("backup_sftp_auth_method", auth_method)
     if auth_method == "password" and password:
         db.set_setting("backup_sftp_password", encrypt_password(password))
-    db.set_setting("backup_retention_count", str(retention_count))
 
-    # Test connection before enabling
-    success, msg = await test_backup_connection()
-    if not success:
-        db.set_setting("backup_enabled", "false")
-        return False, f"Configuration saved but connection test failed: {msg}"
-
-    db.set_setting("backup_enabled", "true")
-    logger.info(f"SFTP backup configured: {username}@{host}:{port}{path}")
-    return True, "SFTP backup configured and connection verified"
+    return await _finalize_configuration("sftp", retention_count)
 
 
-async def _get_sftp_connection():
-    """Create an asyncssh connection from stored settings."""
-    settings = db.get_all_settings()
-    host = settings.get("backup_sftp_host", "")
-    port = int(settings.get("backup_sftp_port", "22"))
-    username = settings.get("backup_sftp_username", "")
-    auth_method = settings.get("backup_sftp_auth_method", "password")
+async def configure_s3_backup(
+    bucket: str,
+    prefix: str = "",
+    region: str = "",
+    endpoint_url: str = "",
+    access_key_id: str = "",
+    secret_access_key: Optional[str] = None,
+    retention_count: int = 30,
+) -> Tuple[bool, str]:
+    """Save S3 backup configuration and test the connection.
 
-    connect_kwargs = {
-        "host": host,
-        "port": port,
-        "username": username,
-        "known_hosts": None,
-        "login_timeout": 30,
-    }
+    Leaving both the access key and the secret blank is valid and means "use
+    ambient credentials" (IAM instance role / AWS_* env vars). A blank secret
+    with a key already stored keeps the stored secret, so changing the bucket
+    doesn't force the operator to re-enter it.
+    """
+    if not bucket:
+        return False, "Bucket name is required"
 
-    if auth_method == "key" and SSH_KEY_PATH.exists():
-        connect_kwargs["client_keys"] = [str(SSH_KEY_PATH)]
-    elif auth_method == "password":
-        stored_pw = settings.get("backup_sftp_password", "")
-        if stored_pw and is_encrypted(stored_pw):
-            stored_pw = decrypt_password(stored_pw)
-        connect_kwargs["password"] = stored_pw
+    if access_key_id and not secret_access_key:
+        existing = db.get_setting("backup_s3_secret_access_key")
+        if not existing:
+            return False, "Secret access key is required when an access key ID is set"
+        secret_access_key = None  # signal to skip overwriting
 
-    return await asyncssh.connect(**connect_kwargs)
+    db.set_setting("backup_s3_bucket", bucket)
+    db.set_setting("backup_s3_prefix", (prefix or "").strip("/"))
+    db.set_setting("backup_s3_region", region)
+    db.set_setting("backup_s3_endpoint_url", (endpoint_url or "").rstrip("/"))
+    db.set_setting("backup_s3_access_key_id", access_key_id)
+    if secret_access_key:
+        db.set_setting("backup_s3_secret_access_key", encrypt_password(secret_access_key))
+    elif not access_key_id:
+        # Switching to ambient credentials — drop any stored secret so it can't
+        # silently outlive the access key it belonged to.
+        db.set_setting("backup_s3_secret_access_key", "")
+
+    return await _finalize_configuration("s3", retention_count)
 
 
 async def test_backup_connection() -> Tuple[bool, str]:
-    """Test SFTP connectivity without uploading.
-
-    Returns (success, message).
-    """
+    """Test connectivity to the configured destination without uploading."""
     try:
-        async with await _get_sftp_connection() as conn:
-            async with conn.start_sftp_client() as sftp:
-                remote_path = db.get_setting("backup_sftp_path") or "/"
-                try:
-                    await sftp.stat(remote_path)
-                except asyncssh.SFTPNoSuchFile:
-                    try:
-                        await sftp.makedirs(remote_path)
-                    except Exception as e:
-                        return False, f"Remote path does not exist and could not be created: {e}"
-                return True, "Connection successful"
-    except asyncssh.PermissionDenied:
-        return False, "Authentication failed - check username/password or key"
-    except asyncssh.DisconnectError as e:
-        return False, f"Connection dropped: {e}"
+        return await backup_targets.get_target().test()
     except Exception as e:
         return False, f"Connection failed: {e}"
 
 
 async def list_backups() -> list[dict]:
-    """List available backups on the SFTP server."""
-    try:
-        async with await _get_sftp_connection() as conn:
-            async with conn.start_sftp_client() as sftp:
-                remote_path = db.get_setting("backup_sftp_path") or "/"
-                try:
-                    entries = await sftp.listdir(remote_path)
-                    backups = sorted(
-                        [e for e in entries if e.startswith("sixtyops-backup-") and e.endswith(".tar.gz")],
-                        reverse=True
-                    )
-                    results = []
-                    for b in backups:
-                        try:
-                            attrs = await sftp.stat(f"{remote_path}/{b}")
-                            results.append({
-                                "name": b,
-                                "size": attrs.size,
-                                "mtime": datetime.fromtimestamp(attrs.mtime).isoformat() if attrs.mtime else None
-                            })
-                        except Exception:
-                            results.append({"name": b})
-                    return results
-                except asyncssh.SFTPNoSuchFile:
-                    return []
-    except Exception as e:
-        logger.warning(f"Failed to list SFTP backups: {e}")
-        return []
+    """List available backups at the configured destination."""
+    return await backup_targets.get_target().list_archives()
 
 
 async def restore_backup(archive_name: str) -> Tuple[bool, str]:
-    """Download a backup from SFTP and restore the database.
+    """Download a backup from the configured destination and restore the DB.
 
     WARNING: This replaces the local sixtyops.db file. The application should
     ideally be restarted after this operation.
     """
-    import re
-    if not re.match(r'^sixtyops-backup-[\w.\-]+\.tar\.gz$', archive_name) or '..' in archive_name:
+    if not is_archive_name(archive_name):
         return False, "Invalid backup archive name"
-
 
     async with _backup_lock:
         try:
             STAGING_DIR.mkdir(parents=True, exist_ok=True)
             local_archive = STAGING_DIR / archive_name
 
-            async with await _get_sftp_connection() as conn:
-                async with conn.start_sftp_client() as sftp:
-                    remote_path = db.get_setting("backup_sftp_path") or "/"
-                    remote_file = f"{remote_path}/{archive_name}"
-                    await sftp.get(remote_file, str(local_archive))
+            data = await backup_targets.get_target().download(archive_name)
+            local_archive.write_bytes(data)
 
             return _restore_from_archive(local_archive)
 
@@ -233,13 +223,14 @@ def _safe_extract(tar: tarfile.TarFile, member: tarfile.TarInfo, dest: Path):
 def _restore_from_archive(local_archive: Path) -> Tuple[bool, str]:
     """Restore the database (and its encryption key) from a downloaded archive.
 
-    Split out from restore_backup so it can be tested without SFTP. Replaces the
-    live DB and — when present — the credential encryption key, keeping the two
-    consistent so a restore onto a fresh host can decrypt stored credentials.
+    Split out from restore_backup so it can be tested without a live
+    destination. Replaces the live DB and — when present — the credential
+    encryption key, keeping the two consistent so a restore onto a fresh host
+    can decrypt stored credentials.
     """
     import shutil
 
-    # Extract sixtyops.db from the archive. The remote SFTP server is in
+    # Extract sixtyops.db from the archive. The remote destination is in
     # principle untrusted (it could be MITM'd or compromised), so guard against
     # tar traversal / symlink overwrite: validate each member is a regular file
     # at the expected path, and use the tarfile data filter (where supported)
@@ -301,15 +292,14 @@ def _restore_from_archive(local_archive: Path) -> Tuple[bool, str]:
 
 
 async def run_backup() -> Tuple[bool, str]:
-    """Run a full backup and upload to SFTP server.
-
-    Returns (success, message).
-    """
+    """Run a full backup and upload it to the configured destination."""
     settings = db.get_all_settings()
     if settings.get("backup_enabled") != "true":
         return False, "Backup not configured"
-    if not settings.get("backup_sftp_host"):
-        return False, "SFTP host not configured"
+    if not backup_targets.is_configured(settings):
+        missing = ("S3 bucket" if backup_targets.get_destination(settings) == "s3"
+                   else "SFTP host")
+        return False, f"{missing} not configured"
 
     if _backup_lock.locked():
         return False, "Backup already in progress"
@@ -319,7 +309,7 @@ async def run_backup() -> Tuple[bool, str]:
 
 
 async def _run_backup_locked() -> Tuple[bool, str]:
-    """Build tar.gz archive and upload via SFTP."""
+    """Build the tar.gz archive and upload it to the configured destination."""
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
     archive_name = f"sixtyops-backup-{timestamp}.tar.gz"
     logger.info(f"Starting backup: {archive_name}")
@@ -332,8 +322,9 @@ async def _run_backup_locked() -> Tuple[bool, str]:
         # ciphertext, so a restore onto a fresh host without the key leaves every
         # credential unrecoverable — a silent data-loss trap where the operator
         # believed they were backed up. Restorability wins (uptime), but it means
-        # the archive effectively contains decryptable credentials, so the SFTP
-        # destination MUST be access-controlled (documented in the UI).
+        # the archive effectively contains decryptable credentials, so the backup
+        # destination MUST be access-controlled — a private bucket, or an SFTP
+        # location you control (documented in the UI).
         #
         # We still do NOT include the per-device config snapshots
         # (_add_device_configs): those add WPA passphrases, SNMP write-
@@ -349,26 +340,9 @@ async def _run_backup_locked() -> Tuple[bool, str]:
 
         archive_bytes = buf.getvalue()
 
-        # Upload via SFTP (5 minute timeout for large archives)
-        remote_path = db.get_setting("backup_sftp_path") or "/backups/sixtyops"
-        async with await _get_sftp_connection() as conn:
-            async with conn.start_sftp_client() as sftp:
-                # Ensure remote directory exists
-                try:
-                    await sftp.stat(remote_path)
-                except asyncssh.SFTPNoSuchFile:
-                    await sftp.makedirs(remote_path)
-
-                remote_file = f"{remote_path}/{archive_name}"
-                try:
-                    async with asyncio.timeout(300):
-                        async with sftp.open(remote_file, "wb") as f:
-                            await f.write(archive_bytes)
-                except TimeoutError:
-                    return False, "Upload timed out after 5 minutes"
-
-                # Enforce retention policy
-                await _enforce_retention(sftp, remote_path)
+        target = backup_targets.get_target()
+        await target.upload(archive_name, archive_bytes)
+        await _enforce_retention(target)
 
         db.set_setting("backup_last_run", datetime.now().isoformat())
         db.set_setting("backup_last_status", "success")
@@ -481,17 +455,18 @@ def _add_device_configs(tar: tarfile.TarFile):
         tar.addfile(info, io.BytesIO(data))
 
 
-async def _enforce_retention(sftp, remote_path: str):
-    """Delete oldest backups beyond the retention count."""
+async def _enforce_retention(target: backup_targets.BackupTarget):
+    """Delete oldest backups beyond the retention count.
+
+    Archive names are timestamped, so the newest-first ordering from
+    list_archives is also the retention order — everything past the window is
+    the tail of that list.
+    """
     retention = int(db.get_setting("backup_retention_count") or "30")
     try:
-        entries = await sftp.listdir(remote_path)
-        backups = sorted(
-            [e for e in entries if e.startswith("sixtyops-backup-") and e.endswith(".tar.gz")]
-        )
-        if len(backups) > retention:
-            for old in backups[:len(backups) - retention]:
-                await sftp.remove(f"{remote_path}/{old}")
-                logger.info(f"Retention cleanup: removed {old}")
+        archives = await target.list_archives()
+        for old in archives[retention:]:
+            await target.delete(old["name"])
+            logger.info(f"Retention cleanup: removed {old['name']}")
     except Exception as e:
         logger.warning(f"Retention cleanup failed: {e}")

@@ -1,6 +1,6 @@
 # Migration Recovery
 
-**Bottom line:** if the Manager fails to start because a database migration crashed mid-run, the recovery is (1) restart the container — `init_db()` is idempotent and resumes from a partial state; (2) if it still crashes, restore from the most recent SFTP backup; (3) only as a last resort, repair the schema by hand. Genuine data loss is rare and only happens if the DB file itself is corrupt.
+**Bottom line:** if the Manager fails to start because a database migration crashed mid-run, the recovery is (1) restart the container — `init_db()` is idempotent and resumes from a partial state; (2) if it still crashes, restore from the most recent remote backup; (3) only as a last resort, repair the schema by hand. Genuine data loss is rare and only happens if the DB file itself is corrupt.
 
 The migration system in `updater/database.py::init_db` uses `CREATE TABLE IF NOT EXISTS`, `CREATE TRIGGER IF NOT EXISTS`, and a `PRAGMA table_info()` check before every `ALTER TABLE`. Each step is safe to re-run, so a crash partway through leaves a partially-migrated DB that the next app start completes. The contract is locked in by `tests/test_migration_failures.py`.
 
@@ -32,13 +32,13 @@ docker compose logs sixtyops-mgmt --tail=100
 
 `init_db()` runs at every startup and adds whatever columns or triggers are missing. If the restart succeeds and `/healthz` returns 200, the recovery is complete.
 
-### Path 2 — restore from SFTP backup
+### Path 2 — restore from a remote backup
 
-If Path 1 still crashes, restore from the most recent backup configured under **Settings → Backups → SFTP**:
+If Path 1 still crashes, restore from the most recent backup configured under **Settings → Backups**:
 
 1. Stop the app: `docker compose stop sixtyops-mgmt`.
 2. Move the broken DB aside: `mv ./data/sixtyops.db ./data/sixtyops.db.broken-$(date +%s)`.
-3. Download the latest backup tarball from the configured SFTP server.
+3. Download the latest backup tarball from the configured destination (SFTP server or S3 bucket).
 4. Extract `sixtyops.db` from the tarball into `./data/`.
 5. Start the app: `docker compose up -d sixtyops-mgmt`.
 
@@ -60,5 +60,5 @@ The authoritative column list and types live in the `CREATE TABLE` block at the 
 
 ## Prevention
 
-- Verify the most recent SFTP backup completed successfully before triggering an in-app self-update — **Settings → Backups** shows `last_status` and `last_run_at`.
+- Verify the most recent backup completed successfully before triggering an in-app self-update — **Settings → Backups** shows `last_status` and `last_run_at`.
 - The `tests/test_migration_failures.py` suite locks in the idempotency, schema-downgrade, and concurrent-writer contracts. Do not relax those tests without a strong reason.

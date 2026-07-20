@@ -92,11 +92,11 @@ HTTPS works out of the box with a self-signed certificate, which is recommended 
 
 <!-- screenshot: HTTPS certificate wizard step -->
 
-**4. Configure SFTP backups (optional)**
+**4. Configure off-box backups (optional)**
 
-Point to an SFTP server for automatic configuration backups.
+Point to an SFTP server or an S3-compatible bucket for automatic backups.
 
-<!-- screenshot: SFTP backup wizard step -->
+<!-- screenshot: backup destination setup -->
 
 **5. Add tower sites and devices**
 

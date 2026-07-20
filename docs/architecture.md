@@ -128,15 +128,23 @@ Sends anonymized job statistics to an AWS Lambda endpoint after each update job 
 
 Sends rich webhook notifications on job completion with success/failure counts, failed device details, rollout phase progress, and next scheduled job info. Configured via `slack_webhook_url` in settings.
 
-### `sftp_backup.py` - System Backup & Restore
+### `remote_backup.py` - System Backup & Restore
 
-SFTP-based backup system for the management database, settings, and device configurations.
+Off-box backup of the management database, settings, and device inventory. Owns *what* is backed up and the restore path; *where* it goes is delegated to `backup_targets.py`.
 
 Key responsibilities:
-- **Scheduled Backups**: Creates a compressed `tar.gz` archive containing the SQLite database, device inventory, and configuration snapshots.
-- **Remote Storage**: Uploads backups to a configured SFTP server with support for password or SSH key authentication.
+- **Scheduled Backups**: Creates a compressed `tar.gz` archive containing the SQLite database, the credential encryption key, sanitized settings, and the device inventory.
 - **Retention**: Automatically prunes older backups based on a configurable retention count.
 - **Restore Flow**: Provides an API to list remote backups and restore the local database from a selected archive (requires system restart).
+
+### `backup_targets.py` - Backup Destinations
+
+The transport layer behind `remote_backup.py`. An install selects exactly one destination via the `backup_destination` setting; nothing in `remote_backup.py` branches on which one is active.
+
+- **`SftpTarget`**: An SFTP server the operator controls, with password or SSH key authentication.
+- **`S3Target`**: S3-compatible object storage. Defaults to AWS S3; setting `backup_s3_endpoint_url` points it at MinIO, Wasabi, Backblaze B2, or Cloudflare R2. Credentials are optional — leaving the access key and secret blank falls back to botocore's default chain (IAM instance role, `AWS_*` environment variables). boto3 is synchronous, so calls are dispatched via `asyncio.to_thread`.
+
+Both implement the same five operations (`test`, `upload`, `download`, `list_archives`, `delete`), so adding a third destination means adding one class, not touching the backup flow.
 
 ### `features.py` - Feature Classification
 

@@ -17,7 +17,7 @@ import pytest
 from cryptography.fernet import Fernet, InvalidToken
 
 from updater import crypto
-from updater import sftp_backup
+from updater import remote_backup
 
 
 def _paths(tmp_path):
@@ -31,7 +31,7 @@ def _paths(tmp_path):
 def _patched(tmp_path):
     data, staging = _paths(tmp_path)
     return patch.multiple(
-        "updater.sftp_backup",
+        "updater.remote_backup",
         STAGING_DIR=staging,
         DATA_DIR=data,
         DB_FILE=data / "sixtyops.db",
@@ -56,8 +56,8 @@ def test_backup_archive_includes_encryption_key(tmp_path):
 
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-            sftp_backup._add_database(tar)
-            sftp_backup._add_encryption_key(tar)
+            remote_backup._add_database(tar)
+            remote_backup._add_encryption_key(tar)
 
         with tarfile.open(fileobj=io.BytesIO(buf.getvalue()), mode="r:gz") as tar:
             names = tar.getnames()
@@ -84,8 +84,8 @@ def test_restore_round_trip_decrypts_on_fresh_host(tmp_path):
         # Build the backup archive (DB + key A).
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-            sftp_backup._add_database(tar)
-            sftp_backup._add_encryption_key(tar)
+            remote_backup._add_database(tar)
+            remote_backup._add_encryption_key(tar)
         archive = staging / "sixtyops-backup-test.tar.gz"
         archive.write_bytes(buf.getvalue())
 
@@ -96,7 +96,7 @@ def test_restore_round_trip_decrypts_on_fresh_host(tmp_path):
         with pytest.raises(InvalidToken):
             crypto.decrypt_password(token)   # key B can't read key A's ciphertext
 
-        ok, msg = sftp_backup._restore_from_archive(archive)
+        ok, msg = remote_backup._restore_from_archive(archive)
         assert ok is True
 
         # Key A is restored and the running process picks it up (cache reset).
@@ -119,8 +119,8 @@ def test_restore_works_without_tarfile_filter_support(tmp_path):
         _make_db(db_file, "tok")
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-            sftp_backup._add_database(tar)
-            sftp_backup._add_encryption_key(tar)
+            remote_backup._add_database(tar)
+            remote_backup._add_encryption_key(tar)
         archive = staging / "sixtyops-backup-old-python.tar.gz"
         archive.write_bytes(buf.getvalue())
         db_file.unlink()
@@ -135,7 +135,7 @@ def test_restore_works_without_tarfile_filter_support(tmp_path):
             return real_extract(self, member, path, *args, **kwargs)
 
         with patch.object(tarfile.TarFile, "extract", py311_extract):
-            ok, msg = sftp_backup._restore_from_archive(archive)
+            ok, msg = remote_backup._restore_from_archive(archive)
         assert ok is True
         assert db_file.exists()
     crypto.reset_cache()
@@ -154,7 +154,7 @@ def test_legacy_archive_without_key_restores_db_and_keeps_local_key(tmp_path):
         # Legacy archive: DB only, no .encryption_key.
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-            sftp_backup._add_database(tar)
+            remote_backup._add_database(tar)
         archive = staging / "sixtyops-backup-legacy.tar.gz"
         archive.write_bytes(buf.getvalue())
 
@@ -162,7 +162,7 @@ def test_legacy_archive_without_key_restores_db_and_keeps_local_key(tmp_path):
         key_file.write_bytes(local_key)
         db_file.unlink()
 
-        ok, msg = sftp_backup._restore_from_archive(archive)
+        ok, msg = remote_backup._restore_from_archive(archive)
         assert ok is True
         assert db_file.exists()
         assert key_file.read_bytes() == local_key  # untouched

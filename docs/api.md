@@ -233,15 +233,19 @@ Request a Let's Encrypt certificate.
 - **Body**: `domain` (form), `email` (form)
 
 ### `GET /backup-setup`
-SFTP backup configuration page.
+Backup configuration page.
 
 ### `POST /backup-setup`
-Configure SFTP backup server.
+Configure the backup destination. `destination` selects which set of fields applies; the other set is ignored.
 
-- **Body**: `host` (form), `port` (form), `path` (form), `username` (form), `auth_method` (form), `password` (form, optional), `ssh_key` (form, optional)
+- **Body (common)**: `destination` (form, `sftp` or `s3`, default `sftp`), `retention_count` (form)
+- **Body (`destination=sftp`)**: `sftp_host`, `sftp_port`, `sftp_path`, `sftp_username`, `auth_method` (`password` or `key`), `sftp_password` (optional), `ssh_key` (optional)
+- **Body (`destination=s3`)**: `s3_bucket`, `s3_prefix` (optional), `s3_region` (optional), `s3_endpoint_url` (optional — blank means AWS), `s3_access_key_id` (optional), `s3_secret_access_key` (optional)
+
+Leaving `s3_access_key_id` and `s3_secret_access_key` blank uses ambient credentials (IAM instance role or `AWS_*` environment variables). Submitting a blank secret with a key already stored keeps the stored secret.
 
 ### `POST /backup-run`
-Trigger an immediate SFTP backup.
+Trigger an immediate backup to the configured destination.
 
 ## WebSocket
 
@@ -476,19 +480,19 @@ Request cancellation of an active update job. Requires admin or operator role.
 ## Backup & Restore
 
 ### `GET /api/backup/status`
-Get SFTP backup configuration and status. Classified as a dangerous feature.
+Get backup configuration and status, including `destination` (`sftp` or `s3`) and `destination_display`. Secrets are never returned — `s3_secret_set` reports only whether one is stored. Classified as a dangerous feature.
 
 ### `POST /api/backup/run`
-Trigger an immediate SFTP backup. Classified as a dangerous feature.
+Trigger an immediate backup to the configured destination. Classified as a dangerous feature.
 
 ### `POST /api/backup/test-connection`
-Test connectivity to the configured SFTP server. Classified as a dangerous feature.
+Test connectivity to the configured destination. For S3 this round-trips a marker object, so it verifies write access rather than just reachability. Classified as a dangerous feature.
 
 ### `GET /api/backup/list`
-List available backup archives on the SFTP server. Classified as a dangerous feature.
+List available backup archives at the configured destination, newest first. Classified as a dangerous feature.
 
 ### `POST /api/backup/restore`
-Restore the management database from an SFTP backup archive. Classified as a dangerous feature.
+Restore the management database from a remote backup archive. Classified as a dangerous feature.
 
 - **Body** (form): `archive_name`
 

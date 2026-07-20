@@ -51,7 +51,8 @@ from . import webhooks
 from . import syslog_forwarder
 from . import email_notifier
 from . import ssl_manager
-from . import sftp_backup
+from . import remote_backup
+from . import backup_targets
 from . import radius_config
 from . import radius_rollout
 from . import oidc_config
@@ -371,12 +372,13 @@ async def _backup_scheduler():
             if last_run and last_run[:10] == now.strftime("%Y-%m-%d"):
                 continue
 
-            # Guard: skip if SFTP host not configured (e.g. migrating from old git backup)
-            if not settings.get("backup_sftp_host"):
+            # Guard: skip if the selected destination is half-configured, so a
+            # partial setup is silently skipped rather than failing every morning.
+            if not backup_targets.is_configured(settings):
                 continue
 
             logger.info("Running scheduled backup")
-            success, msg = await sftp_backup.run_backup()
+            success, msg = await remote_backup.run_backup()
             if success:
                 logger.info(f"Scheduled backup completed: {msg}")
             else:
@@ -1146,7 +1148,7 @@ async def ssl_setup_api(request: Request, session: dict = Depends(require_role("
 async def backup_setup_page(request: Request, session: dict = Depends(require_auth)):
     """Serve the backup setup page."""
     return render_template(request, "backup_setup.html", {
-        "backup_status": sftp_backup.get_backup_status(),
+        "backup_status": remote_backup.get_backup_status(),
         "error": None, "success": None,
     })
 
@@ -1154,25 +1156,43 @@ async def backup_setup_page(request: Request, session: dict = Depends(require_au
 @app.post("/backup-setup")
 async def backup_setup_submit(
     request: Request,
-    sftp_host: str = Form(...),
+    destination: str = Form("sftp"),
+    # SFTP fields — required only when destination is sftp, so they carry
+    # defaults rather than Form(...) and are validated in configure_sftp_backup.
+    sftp_host: str = Form(""),
     sftp_port: int = Form(22),
     sftp_path: str = Form("/backups/sixtyops"),
-    sftp_username: str = Form(...),
+    sftp_username: str = Form(""),
     auth_method: str = Form("password"),
     sftp_password: str = Form(None),
     ssh_key: str = Form(None),
+    # S3 fields
+    s3_bucket: str = Form(""),
+    s3_prefix: str = Form(""),
+    s3_region: str = Form(""),
+    s3_endpoint_url: str = Form(""),
+    s3_access_key_id: str = Form(""),
+    s3_secret_access_key: str = Form(None),
     retention_count: int = Form(30),
     session: dict = Depends(require_role("admin")),
 ):
-    """Handle SFTP backup configuration."""
-    success, message = await sftp_backup.configure_backup(
-        host=sftp_host, port=sftp_port, path=sftp_path,
-        username=sftp_username, auth_method=auth_method,
-        password=sftp_password, ssh_key=ssh_key,
-        retention_count=retention_count,
-    )
+    """Handle backup configuration for the selected destination."""
+    if destination == "s3":
+        success, message = await remote_backup.configure_s3_backup(
+            bucket=s3_bucket, prefix=s3_prefix, region=s3_region,
+            endpoint_url=s3_endpoint_url, access_key_id=s3_access_key_id,
+            secret_access_key=s3_secret_access_key,
+            retention_count=retention_count,
+        )
+    else:
+        success, message = await remote_backup.configure_sftp_backup(
+            host=sftp_host, port=sftp_port, path=sftp_path,
+            username=sftp_username, auth_method=auth_method,
+            password=sftp_password, ssh_key=ssh_key,
+            retention_count=retention_count,
+        )
     return render_template(request, "backup_setup.html", {
-        "backup_status": sftp_backup.get_backup_status(),
+        "backup_status": remote_backup.get_backup_status(),
         "error": None if success else message,
         "success": message if success else None,
     }, status_code=200 if success else 400)
@@ -1181,9 +1201,9 @@ async def backup_setup_submit(
 @app.post("/backup-run")
 async def backup_run_now(request: Request, session: dict = Depends(require_role("admin", "operator")), _pro=Depends(require_feature(Feature.CONFIG_BACKUP))):
     """Trigger an immediate backup."""
-    success, message = await sftp_backup.run_backup()
+    success, message = await remote_backup.run_backup()
     return render_template(request, "backup_setup.html", {
-        "backup_status": sftp_backup.get_backup_status(),
+        "backup_status": remote_backup.get_backup_status(),
         "error": None if success else message,
         "success": message if success else None,
     })
@@ -1191,27 +1211,27 @@ async def backup_run_now(request: Request, session: dict = Depends(require_role(
 
 @app.get("/api/backup/status", tags=["config"])
 async def get_backup_status_api(session: dict = Depends(require_auth), _pro=Depends(require_feature(Feature.CONFIG_BACKUP))):
-    return sftp_backup.get_backup_status()
+    return remote_backup.get_backup_status()
 
 
 @app.post("/api/backup/run", tags=["config"])
 async def api_backup_run_now(session: dict = Depends(require_role("admin", "operator")), _pro=Depends(require_feature(Feature.CONFIG_BACKUP))):
     """Trigger an immediate backup and return JSON result."""
-    success, message = await sftp_backup.run_backup()
+    success, message = await remote_backup.run_backup()
     return {"success": success, "message": message}
 
 
 @app.post("/api/backup/test-connection", tags=["config"])
 async def test_backup_connection_api(session: dict = Depends(require_role("admin", "operator")), _pro=Depends(require_feature(Feature.CONFIG_BACKUP))):
-    """Test SFTP backup connection."""
-    success, message = await sftp_backup.test_backup_connection()
+    """Test the configured backup destination."""
+    success, message = await remote_backup.test_backup_connection()
     return {"success": success, "message": message}
 
 
 @app.get("/api/backup/list", tags=["config"])
 async def list_backups_api(session: dict = Depends(require_role("admin", "operator")), _pro=Depends(require_feature(Feature.CONFIG_BACKUP))):
-    """List available backups on SFTP server."""
-    return await sftp_backup.list_backups()
+    """List available backups at the configured destination."""
+    return await remote_backup.list_backups()
 
 
 @app.post("/api/backup/restore", tags=["config"])
@@ -1220,8 +1240,8 @@ async def restore_backup_api(
     session: dict = Depends(require_role("admin")),
     _pro=Depends(require_feature(Feature.CONFIG_BACKUP))
 ):
-    """Restore database from an SFTP backup archive."""
-    success, message = await sftp_backup.restore_backup(archive_name)
+    """Restore database from a remote backup archive."""
+    success, message = await remote_backup.restore_backup(archive_name)
     if success:
         db.log_audit(session["username"], "backup.restore", "backup", archive_name, "System restore initiated", None)
     return {"success": success, "message": message}

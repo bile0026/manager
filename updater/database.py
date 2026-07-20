@@ -38,6 +38,7 @@ SECRET_SETTINGS_KEYS = frozenset({
     "radius_secret",
     "builtin_radius_secret",
     "backup_sftp_password",
+    "backup_s3_secret_access_key",
     "radius_server_secret",
     "radius_server_ldap_bind_password",
     "webhook_secret",
@@ -1254,14 +1255,26 @@ def init_db():
             "ssl_domain": "",
             "ssl_email": "",
             "ssl_cert_expires": "",
-            # SFTP backup configuration
+            # Remote backup configuration. One destination is active at a time;
+            # "sftp" is the default so installs predating S3 support keep
+            # working without a migration.
             "backup_enabled": "false",
+            "backup_destination": "sftp",  # "sftp" or "s3"
             "backup_sftp_host": "",
             "backup_sftp_port": "22",
             "backup_sftp_path": "/backups/sixtyops",
             "backup_sftp_username": "",
             "backup_sftp_password": "",
             "backup_sftp_auth_method": "password",
+            # S3-compatible object storage. Blank endpoint = AWS; set it for
+            # MinIO/Wasabi/B2/R2. Blank credentials = botocore's default chain
+            # (IAM instance role, AWS_* env vars).
+            "backup_s3_bucket": "",
+            "backup_s3_prefix": "sixtyops",
+            "backup_s3_region": "us-east-1",
+            "backup_s3_endpoint_url": "",
+            "backup_s3_access_key_id": "",
+            "backup_s3_secret_access_key": "",
             "backup_retention_count": "30",
             "backup_last_run": "",
             "backup_last_status": "",
